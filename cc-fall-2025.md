@@ -1,5 +1,5 @@
 # CS6620 Fundamentals of Cloud Computing
-## Comprehensive Course Summary: Weeks 1-10
+## Comprehensive Course Summary: Weeks 1-11
 
 **Course:** CS6620 18670 Fundamentals Cloud Computing SEC 04 Fall 2025
 **Prepared:** November 2025
@@ -17,9 +17,10 @@
 7. [Week 7: IAM Roles and Automated Deployment](#week-7)
 8. [Week 8: Virtual Private Clouds (VPCs)](#week-8)
 9. [Week 9: Advanced Networking and Infrastructure as Code](#week-9)
-10. [Week 10: Production Environments and Observability](#week-10)
-11. [Key Technologies Reference](#technologies-reference)
-12. [Common Commands and Tools](#commands-tools)
+10. [Week 10: Production Architecture and Full Stack Design](#week-10)
+11. [Week 11: Observability and Monitoring](#week-11)
+12. [Key Technologies Reference](#technologies-reference)
+13. [Common Commands and Tools](#commands-tools)
 
 ---
 
@@ -550,7 +551,7 @@ docker compose ps
 
 ---
 
-## <a name="week-6"></a>Week 6: Microservices Architecture
+## <a name="week-6"></a>Week 6: Microservices Architecture and Container Orchestration
 
 ### Main Topics
 - Monolithic vs microservices architecture
@@ -558,6 +559,8 @@ docker compose ps
 - Scalability patterns
 - Service communication
 - Distributed systems challenges
+- Container orchestration with Kubernetes
+- Kubernetes networking (Pods, Services, DNS, iptables)
 
 ### Key Concepts
 
@@ -623,6 +626,22 @@ docker compose ps
    - Authentication/authorization
    - Request routing
 
+**Kubernetes Core Concepts:**
+
+- **Pod:** Smallest deployable unit; runs one or more containers with its own IP and network namespace
+- **Deployment:** Manages a set of identical pod replicas; maintains desired count
+- **Service:** Stable network endpoint for accessing pods (pods are ephemeral, their IPs change)
+  - **ClusterIP:** Internal-only virtual IP, reachable only within the cluster
+  - **NodePort:** Exposes app on a static port on the node's IP for external access
+- **Namespace:** Logical grouping of resources within a cluster (like a folder)
+- **kube-proxy / iptables:** Routes traffic from Service IPs to actual pod IPs via NAT rules
+- **CoreDNS:** Built-in Kubernetes DNS server; creates entries for every Service in format `<service>.<namespace>.svc.cluster.local`
+
+**Kubernetes Network Monitoring Tools:**
+- `ss` — socket statistics: shows listening ports, established connections, and owning processes (`-tlnp` flags)
+- `netstat` — classic predecessor to `ss`, same purpose
+- `iptables` — Linux kernel packet filtering; inspect how kube-proxy programs NAT rules for Services
+
 ### Practical Activities
 
 **Pre-Class: Architecture Comparison**
@@ -634,20 +653,113 @@ docker compose ps
   - Microservices using APIs: True
   - Independent languages/scaling: True
 
-**Post-Class: System Design Deep Dive**
-- Comprehensive video on system design
-- Topics covered:
-  - Reverse proxy (NGINX, Apache)
-  - HTTP structure and headers
-  - Vertical vs horizontal scaling
-  - Load balancing algorithms
-  - Database sharding strategies
-  - Caching with Redis (seen in Week 5 voting app)
-  - CDN architecture
-  - WebSockets for real-time features
-  - Message queues in microservices
-  - Rate limiting strategies
-  - API Gateway patterns
+**In-Class Activity: Kubernetes with Minikube (k8s-in-1-hour)**
+- Install minikube and start with Docker driver:
+  ```bash
+  minikube start --driver=docker
+  ```
+- Clone the tutorial repository:
+  ```bash
+  git clone https://gitlab.com/nanuchi/k8s-in-1-hour.git
+  ```
+- Apply Kubernetes manifests in order:
+  ```bash
+  kubectl apply -f mongo-config.yaml   # ConfigMap for MongoDB settings
+  kubectl apply -f mongo-secret.yaml   # Secrets for MongoDB credentials
+  kubectl apply -f mongo.yaml          # MongoDB Deployment + Service
+  kubectl apply -f webapp.yaml         # Web app Deployment + Service
+  ```
+- Debug any errors encountered (e.g., image pull issues, misconfigured env vars)
+- Get the cluster IP to access the application:
+  ```bash
+  minikube ip
+  ```
+- Verify the web application works and update the database (interests field) as shown in the tutorial
+- Document intermediate steps, errors encountered, and fixes applied
+
+**Post-Class Lab: SAST Scanner on Kubernetes — Network Fundamentals**
+
+Deploy the course project's SAST scanner to Kubernetes and investigate networking at the packet level.
+
+**Part 1: Dockerize the SAST Scanner**
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package.json .
+RUN npm install --production
+COPY scanner.js .
+COPY server.js .
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+Build and load into Minikube:
+```bash
+minikube start --driver=docker --memory=4096 --cpus=2
+docker build -t sast-scanner:latest .
+minikube image load sast-scanner:latest
+```
+
+**Part 2: Deploy with Kubernetes Manifests**
+
+Create `sast-stack.yaml` with:
+- A `lab6` Namespace
+- A Deployment with 2 replicas (`imagePullPolicy: Never` for locally loaded image)
+- A NodePort Service on port 30080 (external access)
+- A ClusterIP Service on port 3000 (internal access)
+
+```bash
+kubectl apply -f sast-stack.yaml
+kubectl wait --for=condition=Ready pods --all -n lab6 --timeout=120s
+kubectl get all -n lab6 -o wide
+```
+
+Test the scanner:
+```bash
+MINIKUBE_IP=$(minikube ip)
+curl -s -X POST http://$MINIKUBE_IP:30080/scan/code \
+  -H "Content-Type: application/json" \
+  -d '{"code": "const password = \"admin123\"; eval(userInput);", "filename": "test.js"}'
+```
+
+**Part 3: Network Topology Discovery**
+```bash
+kubectl get pods -n lab6 -o wide          # Pod IPs
+kubectl get svc -n lab6 -o wide           # Service IPs
+minikube ssh -- ip addr show              # Node interfaces
+minikube ssh -- ip route show             # Routing table
+```
+Key questions: pod CIDR range, ClusterIP CIDR range, why ClusterIP has no route entry (it's virtual — lives only in iptables)
+
+**Part 4: iptables and kube-proxy Internals**
+```bash
+CLUSTERIP=$(kubectl get svc sast-clusterip -n lab6 -o jsonpath='{.spec.clusterIP}')
+minikube ssh -- sudo iptables -t nat -L KUBE-SERVICES -n | head -30
+minikube ssh -- sudo iptables -t nat -L -n | grep -A 5 "$CLUSTERIP"
+# Follow the chain to see load balancing across pod replicas
+minikube ssh -- sudo iptables -t nat -L KUBE-SVC-<chain-id> -n
+# NodePort routing
+minikube ssh -- sudo iptables -t nat -L -n | grep 30080
+```
+
+**Part 5: Socket-Level Analysis**
+```bash
+# Node-level sockets
+minikube ssh -- sudo ss -tlnp
+# Pod-level sockets (each pod has its own network namespace)
+SAST_POD=$(kubectl get pods -n lab6 -l app=sast-scanner -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n lab6 $SAST_POD -- netstat -tlnp
+```
+Observe that port 30080 does NOT appear as a listening socket — it's handled entirely by iptables/kube-proxy, not a real listening process.
+
+**Part 6: Kubernetes DNS (CoreDNS)**
+```bash
+kubectl exec -n lab6 $SAST_POD -- cat /etc/resolv.conf
+kubectl run -n lab6 dnsutils --image=registry.k8s.io/e2e-test-images/jessie-dnsutils:1.3 --restart=Never -- sleep 3600
+kubectl exec -n lab6 dnsutils -- nslookup sast-nodeport.lab6.svc.cluster.local
+kubectl exec -n lab6 dnsutils -- nslookup sast-clusterip.lab6.svc.cluster.local
+kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide
+```
+DNS format: `<service-name>.<namespace>.svc.cluster.local`
 
 ### Key Principles
 - **Single Responsibility:** Each service does one thing well
@@ -656,6 +768,29 @@ docker compose ps
 - **API Contracts:** Well-defined interfaces
 - **Fault Tolerance:** Graceful degradation
 - **Observability:** Monitoring and logging
+
+### Key Commands
+```bash
+# Minikube
+minikube start --driver=docker
+minikube ip
+minikube ssh -- <command>    # Run command inside the Minikube node
+minikube image load image:tag
+
+# kubectl
+kubectl apply -f manifest.yaml
+kubectl get all -n <namespace> -o wide
+kubectl get pods -n <namespace> -o wide
+kubectl get svc -n <namespace> -o wide
+kubectl exec -n <namespace> <pod> -- <command>
+kubectl logs -n <namespace> <pod>
+kubectl wait --for=condition=Ready pods --all -n <namespace> --timeout=120s
+
+# Inspecting networking
+minikube ssh -- sudo ss -tlnp
+minikube ssh -- sudo iptables -t nat -L KUBE-SERVICES -n
+kubectl exec -n <namespace> <pod> -- cat /etc/resolv.conf
+```
 
 ---
 
@@ -1338,15 +1473,14 @@ resource "azurerm_virtual_network" "main" {
 
 ---
 
-## <a name="week-10"></a>Week 10: Production Environments and Observability
+## <a name="week-10"></a>Week 10: Production Architecture and Full Stack Design
 
 ### Main Topics
 - Production deployment strategies
 - Multiple environments (dev, staging, production)
-- Monitoring vs Observability
-- CloudWatch
-- Site Reliability Engineering (SRE)
-- The Four Golden Signals
+- Full-stack architecture design under real constraints
+- Cost-aware infrastructure decisions
+- HIPAA compliance in cloud architecture
 
 ### Key Concepts
 
@@ -1390,6 +1524,74 @@ Deploy to Staging → Full Test Suite → Manual QA → Approval
 Deploy to Production → Monitoring → Rollback if needed
 ```
 
+### Practical Activities
+
+**In-Class Team Activity: MedReminder Full Architecture (~40 min)**
+
+**Background:** MedReminder is a mobile app for patient medication management with four core services:
+- **Mobile API** — handles requests from the patient-facing mobile app
+- **Patient Database** — stores medication schedules and health records (HIPAA-protected PHI)
+- **Notification Service** — sends SMS/email reminders via an external provider (e.g. Twilio, SendGrid)
+- **Doctor Dashboard** — web portal for healthcare providers with read-heavy analytics
+
+**The Situation:** Re-architect the deployment to handle a 10× patient spike (10,000 → 100,000 patients) without compromising reliability or HIPAA compliance.
+
+**Fixed Constraints:**
+- VPC CIDR: `10.0.0.0/16`; Public subnets: `10.0.1.0/24`, `10.0.2.0/24` (ALB only); Private subnets: `10.0.10.0/24`, `10.0.11.0/24` (ECS + database)
+- ECS task spec: 256 CPU units, 512MB memory
+- Reminder processing time: **3 seconds/notification** (bottleneck is external SMS/email provider — SNS/SQS add only milliseconds)
+- Peak window: 80% of reminders fire in a 2-hour morning window (7–9am)
+- Normal load: 200,000 reminders/month → Target: 3,000,000 reminders/month
+- SQS visibility timeout: 30s; message retention: 4 days
+- SNS retry policy: 3 attempts, then permanently discarded
+- Lambda: 512MB, cold start ~75ms, auto-scales
+
+**Component Cost Menu:**
+
+| Component | Option | Monthly Cost |
+|-----------|--------|-------------|
+| Load Balancer | ALB | $16 |
+| Networking | NAT Gateway × 1 AZ | $32 |
+| Networking | NAT Gateway × 2 AZ | $64 |
+| Compute | ECS Fargate per always-on task | $8.50 |
+| Compute | Lambda (3M invocations, 3s, 512MB) | ~$68 |
+| Database | RDS MySQL Single-AZ db.t3.micro | $25 |
+| Database | RDS MySQL Multi-AZ db.t3.medium | $100 |
+| Database | DynamoDB on-demand | ~$4 at 3M reads/writes |
+| Cache | ElastiCache cache.t3.micro | $25 |
+| Messaging | SNS + SQS at 3M msgs/month | $2 |
+| Storage | S3 per 50GB | $1 |
+| Storage | S3 with versioning | $5 |
+| Backups | RDS 35-day retention | +$10 |
+
+**Step 1 — Build your stack (15 min):** Choose one option per component, justify against constraints, and calculate total monthly cost.
+
+**Step 2 — Discussion questions (10 min):**
+
+1. **Compute for notifications:** Option A: SNS → SQS → ECS workers; Option B: SNS → Lambda (auto-scales per message). Given the morning spike, which do you choose and why? What does that imply for sizing the rest of the stack?
+
+2. **Database choice:** RDS Multi-AZ vs DynamoDB for the patient medication database (fixed schema: medication name, dosage, schedule, prescribing doctor). Does the SNS retry constraint (3 attempts, then discard) change your answer?
+
+3. **HIPAA / PHI compliance:** PHI cannot leave the private subnet unencrypted. Identify one component in your stack where this constraint forces a specific configuration choice.
+
+**Step 3 — Present (3 min):**
+- Total monthly cost and the single most expensive line item
+- Which component choice was hardest to agree on, and why
+- What breaks first if patient volume doubles again
+
+---
+
+## <a name="week-11"></a>Week 11: Observability and Monitoring
+
+### Main Topics
+- Monitoring vs Observability
+- CloudWatch
+- Site Reliability Engineering (SRE)
+- The Four Golden Signals
+- Observability in microservices
+
+### Key Concepts
+
 **Monitoring vs Observability:**
 
 **Monitoring:**
@@ -1429,7 +1631,13 @@ Deploy to Production → Monitoring → Rollback if needed
 - Error budgets
 - Automation over manual work
 
+### Practical Activities
 
+**Post-Class Lab: Observability in Microservices**
+- Exercise repository: `/Users/aanchan/work/cs6620-observability/microservices-demo`
+- Hands-on with distributed tracing, metrics collection, and log aggregation across a microservices architecture
+
+---
 
 ## <a name="technologies-reference"></a>Key Technologies Reference
 
@@ -1452,7 +1660,7 @@ Deploy to Production → Monitoring → Rollback if needed
 | Security Groups | Security | Instance-level firewall | 2, 8 |
 | Network ACLs | Security | Subnet-level firewall | 8 |
 | SSM | Management | Systems Manager | 7 |
-| CloudWatch | Monitoring | Metrics, logs, alarms | 4, 10 |
+| CloudWatch | Monitoring | Metrics, logs, alarms | 4, 11 |
 | EventBridge | Integration | Event-driven automation | 4 |
 | ACM | Security | Certificate management | 7, 9 |
 
@@ -1463,6 +1671,8 @@ Deploy to Production → Monitoring → Rollback if needed
 | GitHub Actions | CI/CD automation | 4, 5, 7 |
 | Docker | Containerization | 1, 5 |
 | Docker Compose | Multi-container orchestration | 5, 6 |
+| Kubernetes / Minikube | Container orchestration | 6 |
+| kubectl | Kubernetes CLI | 6 |
 | Terraform | Infrastructure as Code | 9 |
 | Git | Version control | 2, 3 |
 | Python/Flask | Web applications | 2-7 |
@@ -1476,11 +1686,13 @@ Deploy to Production → Monitoring → Rollback if needed
 | CI/CD | Continuous Integration/Deployment | 4, 5, 7, 9 |
 | IaC | Infrastructure as Code | 9, 10 |
 | Microservices | Distributed architecture | 5, 6 |
-| SRE | Site Reliability Engineering | 10 |
-| Monitoring | Known metrics tracking | 10 |
-| Observability | System behavior understanding | 10 |
+| SRE | Site Reliability Engineering | 11 |
+| Monitoring | Known metrics tracking | 11 |
+| Observability | System behavior understanding | 11 |
 | Least Privilege | Minimal permissions | 7 |
 | Environment Parity | Consistent staging/production | 10 |
+| Container Orchestration | Kubernetes pods, services, networking | 6 |
+| HIPAA Compliance | PHI protection in cloud architecture | 10 |
 
 ---
 
